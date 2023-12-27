@@ -6,13 +6,17 @@
 package org.opensearch.agent.tools;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 import org.apache.commons.lang3.StringUtils;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.ad.client.AnomalyDetectionNodeClient;
+import org.opensearch.ad.model.DetectorState;
+import org.opensearch.ad.transport.ADTaskProfileResponse;
 import org.opensearch.client.Client;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.query.BoolQueryBuilder;
@@ -123,15 +127,55 @@ public class SearchAnomalyDetectorsTool implements Tool {
 
         SearchRequest searchDetectorRequest = new SearchRequest().source(searchSourceBuilder);
 
-        if (running != null || disabled != null || failed != null) {
-            // TODO: add a listener to trigger when the first response is received, to trigger the profile API call
-            // to fetch the detector state, etc.
-            // Will need AD client to onboard the profile API first.
-        }
+        // if (running != null || disabled != null || failed != null) {
+        // // TODO: add a listener to trigger when the first response is received, to trigger the profile API call
+        // // to fetch the detector state, etc.
+        // // Will need AD client to onboard the profile API first.);
+        // }
 
         ActionListener<SearchResponse> searchDetectorListener = ActionListener.<SearchResponse>wrap(response -> {
             StringBuilder sb = new StringBuilder();
             SearchHit[] hits = response.getHits().getHits();
+
+            // If we need to filter by detector state, make subsequent profile API calls to each detector
+            if (running != null || disabled != null || failed != null) {
+                
+                // Send out individual AD client calls to fetch detector profiles, continuously adding to a
+                // tracked list of CompletableFutures
+                // TODO: probably change what this response will be so it simplifies things
+                List<CompletableFuture<ADTaskProfileResponse>> profileFutures = new ArrayList<>();
+                for (SearchHit hit : hits) {
+                    CompletableFuture<ADTaskProfileResponse> profileFuture = new CompletableFuture<>();
+                    profileFutures.add(profileFuture);
+                    ActionListener<ADTaskProfileResponse> profileListener = ActionListener.<ADTaskProfileResponse>wrap(profileResponse -> {
+                        profileFuture.complete(profileResponse);
+                    }, e -> {
+                        log.error("Failed to get anomaly detector profile.", e);
+                        profileFuture.completeExceptionally(e);
+                        listener.onFailure(e);
+                    });
+                    adClient.getDetectorProfile(hit.getId(), profileListener);
+                }
+
+                // Wait for all CompletableFutures to complete, and iterate through the responses. Filter out
+                // detectors with unwanted detector states.
+                CompletableFuture<Void> combinedFuture = CompletableFuture.allOf(profileFutures);
+                List<ADTaskProfileResponse> profileResponses = combinedFuture.get();
+                for (ADTaskProfileResponse profileResponse : profileResponses) {
+                    if (profileResponse.getNodes().size() > 0
+                        && profileResponse.getNodes().get(0) != null
+                        && profileResponse.getNodes().get(0).getAdTaskProfile() != null
+                        && profileResponse.getNodes().get(0).getAdTaskProfile().getAdTask() != null) {
+                        String detectorState = profileResponse.getNodes().get(0).getAdTaskProfile().getAdTask().getState();
+                        // TODO: confirm if this ID is correct
+                        String detectorId = profileResponse.getNodes().get(0).getAdTaskProfile().getId();
+                        if (running && detectorState.equalsIgnoreCase(DetectorState.RUNNING)) {
+                            String detectorId = 
+                        }
+                    }
+                }
+            }
+
             sb.append("AnomalyDetectors=[");
             for (SearchHit hit : hits) {
                 sb.append("{");
